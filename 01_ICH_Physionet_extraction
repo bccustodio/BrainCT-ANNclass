@@ -1,0 +1,218 @@
+# Extrai as fatias de CT (brain window) do dataset Physionet CT-ICH e monta
+# arrays (X, y) para uma tarefa de CLASSIFICAÇÃO (presença ou não de hemorragia
+# por fatia), respeitando uma separação INTER-PACIENTE entre treino e teste
+# (nenhum paciente aparece simultaneamente em treino e teste).
+#
+# Dataset: https://physionet.org/content/ct-ich/1.3.1/
+"""Baseado no código de pré-processamento de Hssayeni (Physionet). Adaptado
+para gerar arrays de classificação (X, y) em vez de máscaras de segmentação."""
+
+import pickle
+from pathlib import Path
+
+import numpy as np
+import pandas as pd
+import nibabel as nib
+from PIL import Image
+from sklearn.model_selection import GroupShuffleSplit
+
+
+# ----------------------------------------------------------------------------
+# CONFIGURAÇÕES — ajuste conforme sua máquina
+# ----------------------------------------------------------------------------
+
+# Pasta onde estão o CSV, e as subpastas 'ct_scans' e 'masks' do dataset.
+train_path = Path(
+    'C:/Users/biaco/Code01/BrainCT-Classification/ct-ICH-Physionet-Dataset/'
+    'computed-tomography-images-for-intracranial-hemorrhage-detection-and-segmentation-1.3.1'
+)
+
+# Pasta onde os arquivos .pkl finais serão salvos
+output_path = Path('C:/Users/biaco/Code01/BrainCT-Classification/data-Physionet')
+output_path.mkdir(parents=True, exist_ok=True)
+
+numSubj = 82
+new_size = (256, 256)     # tamanho de saída das imagens (512, 512) --> (256, 256)
+window_specs = [40, 120]  # janela cerebral (level, width)
+test_size = 0.2           # proporção de PACIENTES para teste
+random_state = 42         # semente para reprodutibilidade do split
+
+
+# ----------------------------------------------------------------------------
+# FUNÇÕES AUXILIARES
+# ----------------------------------------------------------------------------
+
+def window_ct(ct_scan, w_level=40, w_width=120):
+    w_min = w_level - w_width / 2
+    w_max = w_level + w_width / 2
+    num_slices = ct_scan.shape[2]
+    for s in range(num_slices):
+        slice_s = ct_scan[:, :, s]
+        slice_s = (slice_s - w_min) * (255 / (w_max - w_min))
+        slice_s[slice_s < 0] = 0
+        slice_s[slice_s > 255] = 255
+        ct_scan[:, :, s] = slice_s
+    return ct_scan
+
+
+def resize_arr(arr, size):
+    """Replacement for scipy.misc.imresize."""
+    im = Image.fromarray(arr.astype(np.uint8))
+    im = im.resize(size, Image.BILINEAR)
+    return np.array(im)
+
+
+# ----------------------------------------------------------------------------
+# LEITURA DO CSV DE RÓTULOS
+# ----------------------------------------------------------------------------
+# Colunas esperadas (ordem oficial do Physionet):
+# 0: PatientNumber | 1: SliceNumber | 2: Intraventricular | 3: Intraparenchymal
+# 4: Subarachnoid  | 5: Epidural    | 6: Subdural         | 7: No_Hemorrhage
+# 8: Fracture_Yes_No
+
+csv_path = train_path / 'hemorrhage_diagnosis_raw_ct.csv'
+if not csv_path.exists():
+    raise FileNotFoundError(f"CSV não encontrado em: {csv_path}")
+
+df = pd.read_csv(csv_path)
+data = df.values
+
+COL_PATIENT = 0
+COL_SLICE = 1
+COL_NO_HEMORRHAGE = 7  # 1 = sem hemorragia | 0 = com hemorragia (algum subtipo)
+
+
+# ----------------------------------------------------------------------------
+# EXTRAÇÃO DAS IMAGENS E RÓTULOS POR FATIA
+# ----------------------------------------------------------------------------
+
+X_list = []       # imagens (fatias de CT)
+y_list = []        # rótulo binário: 1 = hemorragia presente, 0 = sem hemorragia
+patient_list = []  # id do paciente correspondente a cada fatia (para o split)
+
+for sNo in range(0 + 49, numSubj + 49):
+    if sNo > 58 and sNo < 66:  # sem dados brutos disponíveis para esses sujeitos
+        continue
+
+    ct_dir_subj = train_path / 'ct_scans' / "{0:0=3d}.nii".format(sNo)
+    if not ct_dir_subj.exists():
+        print(f'Aviso: CT não encontrada, pulando paciente {sNo}: {ct_dir_subj}')
+        continue
+
+    ct_scan_nifti = nib.load(str(ct_dir_subj))
+    ct_scan = ct_scan_nifti.get_fdata()
+    ct_scan = window_ct(ct_scan, window_specs[0], window_specs[1])
+
+    idx = data[:, COL_PATIENT] == sNo
+    sliceNos = data[idx, COL_SLICE]
+    noHemorrhageFlags = data[idx, COL_NO_HEMORRHAGE]
+
+    if sliceNos.size != ct_scan.shape[2]:
+        print(f'Aviso: paciente {sNo} — número de fatias anotadas ({sliceNos.size}) '
+              f'difere do número de fatias no NIfTI ({ct_scan.shape[2]}).')
+
+    n_slices = min(sliceNos.size, ct_scan.shape[2])
+    for sliceI in range(n_slices):
+        img = resize_arr(ct_scan[:, :, sliceI], new_size)
+        label = 0 if noHemorrhageFlags[sliceI] == 1 else 1  # 1 = hemorragia
+
+        X_list.append(img)
+        y_list.append(label)
+        patient_list.append(sNo)
+
+X = np.array(X_list, dtype=np.uint8)          # shape: (N, H, W)
+y = np.array(y_list, dtype=np.int64)          # shape: (N,)
+patients = np.array(patient_list, dtype=np.int64)
+
+print(f'Total de fatias extraídas: {X.shape[0]}')
+print(f'Distribuição de classes -> sem hemorragia: {(y == 0).sum()} | com hemorragia: {(y == 1).sum()}')
+print(f'Número de pacientes distintos: {len(np.unique(patients))}')
+
+
+# ----------------------------------------------------------------------------
+# SEPARAÇÃO INTER-PACIENTE (TREINO / TESTE)
+# ----------------------------------------------------------------------------
+# GroupShuffleSplit garante que todas as fatias de um mesmo paciente fiquem
+# inteiramente em treino OU em teste, nunca divididas entre os dois.
+
+splitter = GroupShuffleSplit(n_splits=1, test_size=test_size, random_state=random_state)
+train_idx, test_idx = next(splitter.split(X, y, groups=patients))
+
+X_train, y_train = X[train_idx], y[train_idx]
+X_test, y_test = X[test_idx], y[test_idx]
+
+train_patients = set(patients[train_idx])
+test_patients = set(patients[test_idx])
+assert train_patients.isdisjoint(test_patients), "Vazamento de paciente entre treino e teste!"
+
+print(f'Pacientes em treino: {len(train_patients)} | fatias: {X_train.shape[0]}')
+print(f'Pacientes em teste : {len(test_patients)} | fatias: {X_test.shape[0]}')
+
+
+# ----------------------------------------------------------------------------
+# SALVANDO EM ARQUIVOS .PKL
+# ----------------------------------------------------------------------------
+
+def save_pickle(obj, filename):
+    filepath = output_path / filename
+    with open(filepath, 'wb') as f:
+        pickle.dump(obj, f, protocol=pickle.HIGHEST_PROTOCOL)
+    print(f'Salvo: {filepath}')
+
+
+save_pickle({'X': X, 'y': y, 'patients': patients}, 'full_dataset.pkl')
+save_pickle({'X_train': X_train, 'y_train': y_train}, 'train_dataset.pkl')
+save_pickle({'X_test': X_test, 'y_test': y_test}, 'test_dataset.pkl')
+
+print('Concluído.')
+
+# ---------------------------------------------------------------
+# Recarrega o dataset completo (única fonte que tem 'patients')
+# ---------------------------------------------------------------
+with open('data-Physionet/full_dataset.pkl', 'rb') as f:
+    d = pickle.load(f)
+    X, y, patients = d['X'], d['y'], np.array(d['patients'])
+
+# ---------------------------------------------------------------
+# Reproduz o MESMO split inter-paciente do script de extração
+# (mesmos parâmetros: test_size=0.2, random_state=42)
+# ---------------------------------------------------------------
+splitter = GroupShuffleSplit(n_splits=1, test_size=0.2, random_state=42)
+train_idx, test_idx = next(splitter.split(X, y, groups=patients))
+
+patients_train, y_train_chk = patients[train_idx], y[train_idx]
+patients_test, y_test_chk = patients[test_idx], y[test_idx]
+
+# ---------------------------------------------------------------
+# Contagem por paciente (rótulo = máximo entre as fatias do paciente)
+# e por fatia, para treino e teste
+# ---------------------------------------------------------------
+def resumo(patients_arr, y_arr, nome):
+    df = pd.DataFrame({'patient': patients_arr, 'label': y_arr})
+    rot_paciente = df.groupby('patient')['label'].max()
+
+    pac_normal = (rot_paciente == 0).sum()
+    pac_hemo = (rot_paciente == 1).sum()
+    fat_normal = (y_arr == 0).sum()
+    fat_hemo = (y_arr == 1).sum()
+
+    print(f"--- {nome} ---")
+    print(f"Pacientes -> normal: {pac_normal} | hemorragia: {pac_hemo} | total: {rot_paciente.shape[0]}")
+    print(f"Fatias    -> normal: {fat_normal} | hemorragia: {fat_hemo} | total: {y_arr.shape[0]}\n")
+
+print(resumo(patients_train, y_train_chk, "TREINO"))
+print(resumo(patients_test, y_test_chk, "TESTE"))
+
+# checagem extra: confirma que bate com os X/y salvos separadamente
+with open('data-Physionet/train_dataset.pkl', 'rb') as f:
+    assert (pickle.load(f)['y_train'] == y_train_chk).all(), "y_train não bate com o split reconstruído!"
+with open('data-Physionet/test_dataset.pkl', 'rb') as f:
+    assert (pickle.load(f)['y_test'] == y_test_chk).all(), "y_test não bate com o split reconstruído!"
+print("OK: split reconstruído bate com os pickles salvos.")
+
+# ----------------------------------------------------------------------------
+# COMO CARREGAR DEPOIS
+# ----------------------------------------------------------------------------
+# with open('train_dataset.pkl', 'rb') as f:
+#     d = pickle.load(f)
+#     X_train, y_train = d['X_train'], d['y_train']
