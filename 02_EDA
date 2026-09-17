@@ -1,0 +1,173 @@
+import numpy as np
+import pandas as pd
+import pickle
+import matplotlib.pyplot as plt
+
+# =====================================================================
+# 1) CARREGAMENTO DOS DADOS
+# =====================================================================
+with open('data-Physionet/full_dataset.pkl', 'rb') as f:
+    d = pickle.load(f)
+    X, y = d['X'], d['y']
+    patients = np.array(d['patients'])
+
+with open('data-Physionet/train_dataset.pkl', 'rb') as f:
+    d_train = pickle.load(f)
+    X_train, y_train = d_train['X_train'], d_train['y_train']
+
+with open('data-Physionet/test_dataset.pkl', 'rb') as f:
+    d_test = pickle.load(f)
+    X_test, y_test = d_test['X_test'], d_test['y_test']
+
+print('Load complete!')
+
+
+# =====================================================================
+# 2) ANÁLISE EXPLORATÓRIA DE DADOS (EDA)
+# =====================================================================
+
+# ---------------------------------------------------------------
+# 2.1 Análise de dimensões e resoluções
+# ---------------------------------------------------------------
+print("\n===== 2.1 Dimensões e Resoluções =====")
+print(f"Shape de X (dataset completo): {X.shape} | dtype: {X.dtype}")
+print(f"Shape de X_train: {X_train.shape}")
+print(f"Shape de X_test : {X_test.shape}")
+
+if X.ndim == 4:
+    n_img, h, w, ch = X.shape
+    print(f"Número de imagens: {n_img} | Resolução: {h}x{w} | Canais: {ch}")
+elif X.ndim == 3:
+    n_img, h, w = X.shape
+    print(f"Número de imagens: {n_img} | Resolução: {h}x{w} (escala de cinza)")
+
+resolucoes = {tuple(img.shape[:2]) for img in X}
+print(f"Resoluções únicas encontradas: {resolucoes}")
+if len(resolucoes) == 1:
+    print("-> Todas as imagens possuem a mesma resolução.")
+else:
+    print("-> ATENÇÃO: foram encontradas imagens com resoluções diferentes!")
+
+
+# ---------------------------------------------------------------
+# 2.2 Distribuição da intensidade de pixels
+# ---------------------------------------------------------------
+print("\n===== 2.2 Distribuição de Intensidade de Pixels =====")
+print(f"Mínimo : {X.min()}")
+print(f"Máximo : {X.max()}")
+print(f"Média  : {X.mean():.2f}")
+print(f"Desvio padrão: {X.std():.2f}")
+
+plt.figure(figsize=(8, 5))
+plt.hist(X.ravel(), bins=50, color='steelblue', edgecolor='black')
+plt.title("Distribuição da Intensidade de Pixels - Dataset Completo")
+plt.xlabel("Intensidade de pixel")
+plt.ylabel("Frequência")
+plt.tight_layout()
+plt.savefig("eda_distribuicao_pixels.png", dpi=150)
+plt.show()
+
+# Comparação da intensidade entre as classes (insight extra)
+plt.figure(figsize=(8, 5))
+plt.hist(X[y == 0].ravel(), bins=50, alpha=0.6, label='Normal (0)', color='seagreen')
+plt.hist(X[y == 1].ravel(), bins=50, alpha=0.6, label='Hemorragia (1)', color='firebrick')
+plt.title("Distribuição de Intensidade de Pixels por Classe")
+plt.xlabel("Intensidade de pixel")
+plt.ylabel("Frequência")
+plt.legend()
+plt.tight_layout()
+plt.savefig("eda_distribuicao_pixels_por_classe.png", dpi=150)
+plt.show()
+
+
+# ---------------------------------------------------------------
+# 2.3 Identificação de desequilíbrio de classes (0: Normal, 1: Hemorragia)
+# ---------------------------------------------------------------
+print("\n===== 2.3 Distribuição das Classes =====")
+classes, contagens = np.unique(y, return_counts=True)
+for c, n in zip(classes, contagens):
+    rotulo = "Normal" if c == 0 else "Hemorragia"
+    print(f"Classe {c} ({rotulo}): {n} amostras ({100 * n / len(y):.2f}%)")
+
+plt.figure(figsize=(6, 5))
+bars = plt.bar(['Normal (0)', 'Hemorragia (1)'], contagens, color=['seagreen', 'firebrick'])
+plt.title("Distribuição de Classes - Dataset Completo")
+plt.ylabel("Número de amostras")
+for bar, n in zip(bars, contagens):
+    plt.text(bar.get_x() + bar.get_width() / 2, n + max(contagens) * 0.01, str(n), ha='center')
+plt.tight_layout()
+plt.savefig("eda_distribuicao_classes.png", dpi=150)
+plt.show()
+
+for nome, y_split in [('Treino', y_train), ('Teste', y_test)]:
+    c, n = np.unique(y_split, return_counts=True)
+    print(f"\nConjunto de {nome}:")
+    for cc, nn in zip(c, n):
+        rotulo = "Normal" if cc == 0 else "Hemorragia"
+        print(f"  Classe {cc} ({rotulo}): {nn} ({100 * nn / len(y_split):.2f}%)")
+
+
+# ---------------------------------------------------------------
+# 2.4 Número de fatias (slices) por paciente
+# ---------------------------------------------------------------
+print("\n===== 2.4 Número de Fatias por Paciente =====")
+
+pacientes, fatias_por_paciente = np.unique(patients, return_counts=True)
+print(f"Número total de pacientes: {len(pacientes)}")
+print(f"Número total de fatias: {len(patients)}")
+print(f"Fatias por paciente -> mín: {fatias_por_paciente.min()}, "
+      f"máx: {fatias_por_paciente.max()}, média: {fatias_por_paciente.mean():.1f}, "
+      f"mediana: {np.median(fatias_por_paciente):.1f}")
+
+ordem = np.argsort(fatias_por_paciente)[::-1]
+plt.figure(figsize=(10, 5))
+plt.bar(range(len(pacientes)), fatias_por_paciente[ordem], color='slateblue')
+plt.title("Número de Fatias (Slices) por Paciente")
+plt.xlabel("Paciente (ordenado, maior -> menor)")
+plt.ylabel("Número de fatias")
+plt.tight_layout()
+plt.savefig("eda_fatias_por_paciente.png", dpi=150)
+plt.show()
+
+# Fatias por paciente, separadas por classe (quantas fatias com hemorragia
+# cada paciente tem, do total de fatias que ele possui)
+print("\nFatias com hemorragia por paciente (top 10 com mais fatias):")
+df_pac = pd.DataFrame({'paciente': patients, 'label': y})
+resumo_pac = (
+    df_pac.groupby('paciente')['label']
+    .agg(total_fatias='count', fatias_hemorragia='sum')
+    .sort_values('total_fatias', ascending=False)
+)
+print(resumo_pac.head(10))
+
+
+# ---------------------------------------------------------------
+# 2.5 Amostragem visual
+# ---------------------------------------------------------------
+print("\n===== 2.5 Amostragem Visual =====")
+n_amostras = 4
+rng = np.random.default_rng(5)
+
+idx_normal = np.where(y == 0)[0]
+idx_hemorragia = np.where(y == 1)[0]
+
+amostras_normal = rng.choice(idx_normal, size=min(n_amostras, len(idx_normal)), replace=False)
+amostras_hemorragia = rng.choice(idx_hemorragia, size=min(n_amostras, len(idx_hemorragia)), replace=False)
+
+fig, axes = plt.subplots(2, n_amostras, figsize=(3 * n_amostras, 6))
+for i, idx in enumerate(amostras_normal):
+    axes[0, i].imshow(np.squeeze(X[idx]), cmap='gray')
+    axes[0, i].set_title(f"Normal (idx {idx})")
+    axes[0, i].axis('off')
+
+for i, idx in enumerate(amostras_hemorragia):
+    axes[1, i].imshow(np.squeeze(X[idx]), cmap='gray')
+    axes[1, i].set_title(f"Hemorragia (idx {idx})")
+    axes[1, i].axis('off')
+
+# plt.suptitle("Amostragem Visual: Normal vs Hemorragia")
+plt.tight_layout()
+plt.savefig("eda_amostragem_visual.png", dpi=150)
+plt.show()
+
+print("\nEDA concluída! Gráficos salvos como arquivos .png no diretório atual.")
